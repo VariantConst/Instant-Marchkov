@@ -1,20 +1,17 @@
 {
-  "name": "3-2-1-marchkov-next",
-  "version": "0.1.0",
-  "private": true,
+  "name": "nuclear-nebula",
+  "type": "module",
+  "version": "0.0.1",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
   },
   "dependencies": {
-    "react": "^18",
-    "react-dom": "^18",
-    "next": "14.2.4"
-  },
-  "devDependencies": {
-    "postcss": "^8",
-    "tailwindcss": "^3.4.1"
+    "@astrojs/tailwind": "^5.1.0",
+    "astro": "^4.11.1",
+    "tailwindcss": "^3.4.4"
   }
 }

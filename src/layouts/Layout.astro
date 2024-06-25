@@ -1,0 +1,26 @@
+---
+// src/layouts/Layout.astro
+---
+
+<html lang="zh">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="viewport" content="width=device-width" />
+		<meta name="generator" content={Astro.generator} />
+		<title>{Astro.props.title}</title>
+	</head>
+	<body>
+		<nav class="bg-blue-500 p-4">
+			<div class="container mx-auto">
+				<h1 class="text-white text-2xl font-bold">PKU班车预约系统</h1>
+			</div>
+		</nav>
+		<slot />
+		<footer class="bg-gray-200 p-4 mt-8">
+			<div class="container mx-auto text-center">
+				<p>&copy; 2024 PKU班车预约系统。保留所有权利。</p>
+			</div>
+		</footer>
+	</body>
+</html>

@@ -1,0 +1,17 @@
+---
+// src/pages/index.astro
+import Layout from '../layouts/Layout.astro';
+import BusReservationForm from '../components/BusReservationForm.astro';
+import ReservationResults from '../components/ReservationResults.astro';
+---
+
+<Layout title="PKU Bus Reservation">
+	<main class="container mx-auto p-4">
+		<h1 class="text-3xl font-bold mb-4">PKU Bus Reservation System</h1>
+		<BusReservationForm />
+		<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-8">
+			<ReservationResults title="To Yanyuan" isReturn={false} />
+			<ReservationResults title="To Changping" isReturn={true} />
+		</div>
+	</main>
+</Layout>

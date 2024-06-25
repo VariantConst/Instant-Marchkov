@@ -1,0 +1,32 @@
+<div class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
+	<h2 class="text-2xl font-bold mb-4">{Astro.props.title}</h2>
+	<div id={Astro.props.isReturn ? 'toChangpingResults' : 'toYanyuanResults'}></div>
+</div>
+
+<script define:vars={{ isReturn: Astro.props.isReturn }}>
+	const resultDiv = document.getElementById(isReturn ? 'toChangpingResults' : 'toYanyuanResults');
+	
+	const updateResults = (event) => {
+		const data = event.detail;
+		let html = '';
+		
+		if (data.success) {
+			html += `<p class="text-green-500 mb-4">${data.message}</p>`;
+			data.reservations.forEach(reservation => {
+				html += `
+					<div class="mb-4 p-4 border rounded">
+						<p><strong>Route:</strong> ${reservation.reserved_route}</p>
+						<p><strong>Time:</strong> ${reservation.reserved_time}</p>
+						<img src="${reservation.qr_code}" alt="QR Code" class="mt-2">
+					</div>
+				`;
+			});
+		} else {
+			html += `<p class="text-red-500">${data.message}</p>`;
+		}
+		
+		resultDiv.innerHTML = html;
+	};
+
+	window.addEventListener(isReturn ? 'toChangpingResult' : 'toYanyuanResult', updateResults);
+</script>

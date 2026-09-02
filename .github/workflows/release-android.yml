@@ -181,7 +181,7 @@ jobs:
           expected="7CE270503976BA420800C44C3E7DC8A8D7B305FBA8C515074ED0EBC9D79F4AA6"
           actual="$(
             printf '%s\n' "$verify_output" |
-              sed -n 's/^Signer #1 certificate SHA-256 digest:[[:space:]]*//p' |
+              sed -n 's/^.*certificate SHA-256 digest:[[:space:]]*//p' |
               head -n 1 |
               tr -d ':[:space:]' |
               tr '[:lower:]' '[:upper:]'

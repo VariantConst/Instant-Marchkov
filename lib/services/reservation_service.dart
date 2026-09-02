@@ -117,7 +117,8 @@ class ReservationService {
                 String timeStr = slot['yaxis'].trim(); // 除空格
 
                 // 将日期和时间合并
-                DateTime dateTime = DateTime.parse('$dateStr $timeStr');
+                DateTime dateTime =
+                    DateTime.parse('$dateStr ${timeStr.padLeft(5, '0')}');
 
                 // 格式化日期和时间
                 String normalizedDate =

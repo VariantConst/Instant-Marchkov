@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/reservation_provider.dart';
+import '../../providers/ride_history_provider.dart';
 import '../../models/reservation.dart';
+import '../../models/ride_info.dart';
 import '../../services/reservation_service.dart';
 // 新增导入
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:async';
 import 'dart:convert';
 import '../../providers/auth_provider.dart';
-import '../../services/ride_history_service.dart';
 import 'package:intl/intl.dart';
 import '../../providers/brightness_provider.dart';
 import '../settings/ride_settings_page.dart'; // 导入 BrightnessControlMode 枚举
@@ -63,8 +65,10 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
 
   DateTime? _lastRetryTime;
 
-  // 添加一个新的状态变量来控制初始化流程
-  bool _shouldCancelInitialization = false;
+  // 只有最新一轮初始化可以回写页面状态。
+  int _initializationGeneration = 0;
+
+  bool _hasStartedRideHistoryRefresh = false;
 
   @override
   void didChangeDependencies() {
@@ -113,18 +117,19 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
 
   // 修改 _initialize 方法以并行获取所有班车的数据
   Future<void> _initialize() async {
+    final generation = ++_initializationGeneration;
+
     if (mounted) {
       setState(() {
+        _isToggleLoading = false;
         _loadingStep = '正在获取班车列表...';
       });
     }
 
     try {
-      // 添加取消检查
-      if (_shouldCancelInitialization) return;
-      await _loadNearbyBuses();
+      await _loadNearbyBuses(generation);
 
-      if (!mounted || _shouldCancelInitialization) return;
+      if (!_isCurrentInitialization(generation)) return;
 
       if (_nearbyBuses.isEmpty) {
         setState(() {
@@ -150,47 +155,54 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
         );
       });
 
-      // 添加取消检查
-      if (_shouldCancelInitialization) return;
+      if (!_isCurrentInitialization(generation)) return;
       setState(() {
         _loadingStep = '正在获取班车信息...';
       });
 
       await Future.wait([
         for (int i = 0; i < _nearbyBuses.length; i++)
-          if (!_shouldCancelInitialization) _fetchBusData(i),
+          _fetchBusData(i, generation),
       ]);
 
-      // 添加取消检查
-      if (_shouldCancelInitialization) return;
+      if (!_isCurrentInitialization(generation)) return;
       if (_autoReservationEnabled && !_hasAttemptedAutoReservation) {
         setState(() {
           _loadingStep = '正在尝试自动预约...';
         });
-        await _tryAutoReservation();
+        await _tryAutoReservation(generation);
       }
 
-      if (mounted && !_shouldCancelInitialization) {
+      if (_isCurrentInitialization(generation)) {
         setState(() {
           _isLoading = false;
           _loadingStep = '加载完成';
         });
+        _refreshRideHistoryInBackground();
       }
     } catch (e) {
-      if (mounted && !_shouldCancelInitialization) {
+      if (_isCurrentInitialization(generation)) {
         setState(() {
           _isLoading = false;
           _loadingStep = '加载失败: ${e.toString()}';
         });
       }
-    } finally {
-      _shouldCancelInitialization = false;
     }
   }
 
+  bool _isCurrentInitialization(int generation) {
+    return mounted && generation == _initializationGeneration;
+  }
+
   // 新增方法，用于并行获取每个班车的数据而不改变选中的班车索引
-  Future<void> _fetchBusData(int index) async {
-    final bus = _nearbyBuses[index];
+  Future<void> _fetchBusData(int index, int generation) async {
+    if (!_isCurrentInitialization(generation) ||
+        index < 0 ||
+        index >= _nearbyBuses.length) {
+      return;
+    }
+
+    final bus = Map<String, dynamic>.from(_nearbyBuses[index]);
     final reservationProvider =
         Provider.of<ReservationProvider>(context, listen: false);
     final reservationService =
@@ -198,6 +210,8 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
 
     try {
       await reservationProvider.loadCurrentReservations();
+      if (!_isCurrentInitialization(generation)) return;
+
       Reservation? matchingReservation;
 
       try {
@@ -209,54 +223,57 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
                   '${bus['abscissa']} ${bus['yaxis']}',
         );
       } catch (e) {
-        matchingReservation = null; // 如果没有找到匹配的预约，设置为 null
+        matchingReservation = null;
       }
 
       if (matchingReservation != null) {
-        await _fetchQRCode(reservationProvider, matchingReservation, index);
+        await _fetchQRCodeForInitialization(
+          reservationService,
+          matchingReservation,
+          index,
+          generation,
+        );
       } else {
-        // 仅比较 HH:mm
-        final departureTimeStr = bus['yaxis']; // "HH:mm"
+        final departureTimeStr = bus['yaxis'];
         final nowStr = DateFormat('HH:mm').format(DateTime.now());
         final isPastDeparture = departureTimeStr.compareTo(nowStr) <= 0;
 
         if (isPastDeparture) {
           final tempCode = await _fetchTempCode(reservationService, bus);
-          if (tempCode != null) {
-            if (mounted) {
-              setState(() {
-                _cardStates[index] = {
-                  'qrCode': tempCode['code'],
-                  'departureTime': tempCode['departureTime']!,
-                  'routeName': bus['route_name'],
-                  'codeType': '临时码',
-                  'errorMessage': '',
-                };
-              });
-            }
-          } else {
-            if (mounted) {
-              setState(() {
-                _cardStates[index]['errorMessage'] = '无法获取临时码';
-              });
-            }
+          if (!_isCurrentInitialization(generation) ||
+              index >= _cardStates.length) {
+            return;
           }
-        } else {
-          if (mounted) {
+          if (tempCode != null) {
             setState(() {
               _cardStates[index] = {
-                'qrCode': null,
-                'departureTime': bus['yaxis'],
+                'qrCode': tempCode['code'],
+                'departureTime': tempCode['departureTime']!,
                 'routeName': bus['route_name'],
-                'codeType': '待预约',
+                'codeType': '临时码',
                 'errorMessage': '',
               };
             });
+          } else {
+            setState(() {
+              _cardStates[index]['errorMessage'] = '无法获取临时码';
+            });
           }
+        } else if (_isCurrentInitialization(generation) &&
+            index < _cardStates.length) {
+          setState(() {
+            _cardStates[index] = {
+              'qrCode': null,
+              'departureTime': bus['yaxis'],
+              'routeName': bus['route_name'],
+              'codeType': '待预约',
+              'errorMessage': '',
+            };
+          });
         }
       }
     } catch (e) {
-      if (mounted) {
+      if (_isCurrentInitialization(generation) && index < _cardStates.length) {
         setState(() {
           _cardStates[index]['errorMessage'] = '加载数据时出错: $e';
         });
@@ -264,8 +281,8 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
     }
   }
 
-  Future<void> _loadNearbyBuses() async {
-    if (mounted) {
+  Future<void> _loadNearbyBuses(int generation) async {
+    if (_isCurrentInitialization(generation)) {
       setState(() {
         _loadingStep = '正在检查缓存数据...';
       });
@@ -279,15 +296,15 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
     final cachedDate = prefs.getString('cachedDate');
 
     if (cachedBusDataString != null && cachedDate == todayString) {
-      if (mounted) {
+      if (_isCurrentInitialization(generation)) {
         setState(() {
           _loadingStep = '正在加载缓存数据...';
         });
       }
       final cachedBusData = json.decode(cachedBusDataString);
-      _processBusData(cachedBusData);
+      _processBusData(cachedBusData, generation);
     } else {
-      if (!mounted) return;
+      if (!mounted || generation != _initializationGeneration) return;
 
       setState(() {
         _loadingStep = '正在从服务器获取班车数据...';
@@ -301,38 +318,37 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
         await prefs.setString('cachedBusData', json.encode(allBuses));
         await prefs.setString('cachedDate', todayString);
 
-        if (!mounted) return;
+        if (!_isCurrentInitialization(generation)) return;
 
         setState(() {
           _loadingStep = '正在处理班车数据...';
         });
-        _processBusData(allBuses);
+        _processBusData(allBuses, generation);
       } catch (e) {
-        if (mounted) {
+        if (_isCurrentInitialization(generation)) {
           setState(() {
             _loadingStep = '加载班车数据失败: $e';
           });
         }
-        print('加载附近班车失败: $e');
+        debugPrint('加载附近班车失败: $e');
       }
     }
 
-    if (mounted) {
+    if (_isCurrentInitialization(generation)) {
       setState(() {
-        _loadingStep = '正在加载乘车历史...';
+        _loadingStep = '正在应用乘车偏好...';
       });
-      await _loadRideHistory();
+      await _applyCachedRideHistory(generation);
     }
   }
 
-  void _processBusData(List<dynamic> busData) {
+  void _processBusData(List<dynamic> busData, int generation) {
     final now = DateTime.now();
-    _nearbyBuses = busData
+    final nearbyBuses = busData
         .where((bus) {
           final busTime = DateTime.parse('${bus['abscissa']} ${bus['yaxis']}');
           final diff = busTime.difference(now).inMinutes;
 
-          // 添加路线名称过滤条件
           final routeName = bus['route_name'].toString().toLowerCase();
           final containsXin = routeName.contains('新');
           final containsYan = routeName.contains('燕');
@@ -342,42 +358,70 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
         .toList()
         .cast<Map<String, dynamic>>();
 
-    if (mounted) {
-      setState(() {});
+    if (_isCurrentInitialization(generation)) {
+      setState(() {
+        _nearbyBuses = nearbyBuses;
+      });
     }
   }
 
-  Future<void> _loadRideHistory() async {
-    final rideHistoryService =
-        RideHistoryService(Provider.of<AuthProvider>(context, listen: false));
-    final rideHistory = await rideHistoryService.getRideHistory();
+  Future<void> _applyCachedRideHistory(int generation) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cachedHistoryJson = prefs.getString('cachedRideHistory');
+      if (cachedHistoryJson == null || !_isCurrentInitialization(generation)) {
+        return;
+      }
 
-    // 统计每个班车（路线名 + 时间，不含日期）的乘坐次数
-    Map<String, int> busUsageCount = {};
+      final cachedHistory = CachedRideHistory.fromJson(
+        json.decode(cachedHistoryJson) as Map<String, dynamic>,
+      );
+      _sortNearbyBusesByRideHistory(cachedHistory.rides, generation);
+    } catch (e) {
+      debugPrint('读取缓存乘车历史失败: $e');
+    }
+  }
+
+  void _sortNearbyBusesByRideHistory(
+      List<RideInfo> rideHistory, int generation) {
+    if (!_isCurrentInitialization(generation)) return;
+
+    final Map<String, int> busUsageCount = {};
     for (var bus in _nearbyBuses) {
-      String busKey = '${bus['route_name']}_${bus['yaxis']}'; // 只使用时间，不包含日期
+      final busKey = '${bus['route_name']}_${bus['yaxis']}';
       busUsageCount[busKey] = 0;
     }
 
     for (var ride in rideHistory) {
-      DateTime rideDateTime = DateTime.parse(ride.appointmentTime);
-      String rideTime = DateFormat('HH:mm').format(rideDateTime);
-      String rideKey = '${ride.resourceName}_$rideTime';
+      final rideDateTime = DateTime.parse(ride.appointmentTime);
+      final rideTime = DateFormat('HH:mm').format(rideDateTime);
+      final rideKey = '${ride.resourceName}_$rideTime';
       if (busUsageCount.containsKey(rideKey)) {
         busUsageCount[rideKey] = busUsageCount[rideKey]! + 1;
       }
     }
 
-    // 根据乘坐次数对班车进行排序
-    _nearbyBuses.sort((a, b) {
-      String keyA = '${a['route_name']}_${a['yaxis']}';
-      String keyB = '${b['route_name']}_${b['yaxis']}';
+    final sortedBuses = List<Map<String, dynamic>>.from(_nearbyBuses);
+    sortedBuses.sort((a, b) {
+      final keyA = '${a['route_name']}_${a['yaxis']}';
+      final keyB = '${b['route_name']}_${b['yaxis']}';
       return busUsageCount[keyB]!.compareTo(busUsageCount[keyA]!);
     });
 
-    if (mounted) {
-      setState(() {});
+    if (_isCurrentInitialization(generation)) {
+      setState(() {
+        _nearbyBuses = sortedBuses;
+      });
     }
+  }
+
+  void _refreshRideHistoryInBackground() {
+    if (_hasStartedRideHistoryRefresh || !mounted) return;
+    _hasStartedRideHistoryRefresh = true;
+
+    final rideHistoryProvider =
+        Provider.of<RideHistoryProvider>(context, listen: false);
+    unawaited(rideHistoryProvider.loadRideHistory());
   }
 
   Future<void> _selectBus(int index) async {
@@ -482,6 +526,38 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
       if (mounted) {
         setState(() {
           _cardStates[index]['errorMessage'] = '加载数据时出错: $e';
+        });
+      }
+    }
+  }
+
+  Future<void> _fetchQRCodeForInitialization(ReservationService service,
+      Reservation reservation, int index, int generation) async {
+    try {
+      final qrCode = await service.getReservationQRCode(
+        reservation.id.toString(),
+        reservation.hallAppointmentDataId.toString(),
+      );
+      final actualDepartureTime = await _getActualDepartureTime(reservation);
+
+      if (_isCurrentInitialization(generation) && index < _cardStates.length) {
+        setState(() {
+          _cardStates[index] = {
+            'qrCode': qrCode,
+            'departureTime': actualDepartureTime,
+            'routeName': reservation.resourceName,
+            'codeType': '乘车码',
+            'appointmentId': reservation.id.toString(),
+            'hallAppointmentDataId':
+                reservation.hallAppointmentDataId.toString(),
+            'errorMessage': '',
+          };
+        });
+      }
+    } catch (e) {
+      if (_isCurrentInitialization(generation) && index < _cardStates.length) {
+        setState(() {
+          _cardStates[index]['errorMessage'] = '获取二维码时出错: $e';
         });
       }
     }
@@ -635,8 +711,9 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
   }
 
   // 添加新的方法来尝试自动预约
-  Future<void> _tryAutoReservation() async {
-    if (_nearbyBuses.isEmpty ||
+  Future<void> _tryAutoReservation(int generation) async {
+    if (!_isCurrentInitialization(generation) ||
+        _nearbyBuses.isEmpty ||
         _cardStates.isEmpty ||
         _hasAttemptedAutoReservation) {
       return;
@@ -649,9 +726,10 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
 
     // 检查第一个卡片是否可以预约
     final firstCardState = _cardStates[0];
-    if (firstCardState['codeType'] == '待预约') {
+    if (_isCurrentInitialization(generation) &&
+        firstCardState['codeType'] == '待预约') {
       try {
-        await _makeReservation(0);
+        await _makeReservation(0, generation: generation);
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -865,13 +943,15 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
     );
   }
 
-  Future<void> _makeReservation(int index) async {
+  Future<void> _makeReservation(int index, {int? generation}) async {
+    if (generation != null && !_isCurrentInitialization(generation)) return;
+
     setState(() {
       _isToggleLoading = true;
       _cardStates[index]['errorMessage'] = '';
     });
 
-    final bus = _nearbyBuses[index];
+    final bus = Map<String, dynamic>.from(_nearbyBuses[index]);
     final reservationService =
         ReservationService(Provider.of<AuthProvider>(context, listen: false));
     final reservationProvider =
@@ -883,9 +963,11 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
         bus['abscissa'],
         bus['time_id'].toString(),
       );
+      if (generation != null && !_isCurrentInitialization(generation)) return;
 
       // 获取最新的预约列表
       await reservationProvider.loadCurrentReservations();
+      if (generation != null && !_isCurrentInitialization(generation)) return;
 
       // 尝试匹配刚刚预约的班车
       Reservation? matchingReservation;
@@ -903,20 +985,36 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
 
       if (matchingReservation != null) {
         // 获取乘车码
-        await _fetchQRCode(reservationProvider, matchingReservation, index);
+        if (generation == null) {
+          await _fetchQRCode(reservationProvider, matchingReservation, index);
+        } else {
+          await _fetchQRCodeForInitialization(
+            reservationService,
+            matchingReservation,
+            index,
+            generation,
+          );
+        }
       } else {
-        setState(() {
-          _cardStates[index]['errorMessage'] = '无法找到匹配的预约信息';
-        });
+        if (generation == null || _isCurrentInitialization(generation)) {
+          setState(() {
+            _cardStates[index]['errorMessage'] = '无法找到匹配的预约信息';
+          });
+        }
       }
     } catch (e) {
-      setState(() {
-        _cardStates[index]['errorMessage'] = '预约失败: $e';
-      });
+      if (generation == null || _isCurrentInitialization(generation)) {
+        setState(() {
+          _cardStates[index]['errorMessage'] = '预约失败: $e';
+        });
+      }
     } finally {
-      setState(() {
-        _isToggleLoading = false;
-      });
+      if (mounted &&
+          (generation == null || _isCurrentInitialization(generation))) {
+        setState(() {
+          _isToggleLoading = false;
+        });
+      }
     }
   }
 
@@ -938,8 +1036,8 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
 
     if (_isRetrying) return;
 
-    // 设置取消标志
-    _shouldCancelInitialization = true;
+    // 让仍在运行的旧初始化立即失效。
+    _initializationGeneration++;
 
     if (!mounted) return;
     setState(() {
@@ -962,8 +1060,6 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
         _loadingStep = '正在重新加载数据...';
       });
 
-      // 重置取消标志
-      _shouldCancelInitialization = false;
       await _initialize();
     } catch (e) {
       if (mounted) {
@@ -984,7 +1080,6 @@ class RidePageState extends State<RidePage> with AutomaticKeepAliveClientMixin {
           _isRetrying = false;
         });
       }
-      _shouldCancelInitialization = false;
     }
   }
 }
